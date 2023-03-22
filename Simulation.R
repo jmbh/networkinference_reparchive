@@ -1,4 +1,4 @@
-# jonashaslbeck@gmail.com; March 14, 2022
+# jonashaslbeck@protonmail.com; March 2, 2023
 
 # --------------------------------------------------------------
 # ---------- Get Iteration Number ------------------------------
@@ -23,7 +23,7 @@ library(glmnet)
 library(inet)
 library(mgm)
 library(qgraph)
-
+library(corpcor)
 
 # Parallel
 library(foreach)
@@ -48,134 +48,190 @@ pe_seq <- c(0.2, 0.4)
 
 # Table with simulation variations
 var_grid <- expand.grid(n_seq, pe_seq)
+n_gs <- nrow(var_grid)
 
+nIter <- 110 # a few more in case there are technical errors
+
+# Algorithm settings
 
 # -----------------------------------------------------
 # -------- Simulate -----------------------------------
 # -----------------------------------------------------
 
 # Setup parallelization
-cluster <- 12
+cluster <- nIter
 cl <- makeCluster(cluster, outfile="")
 registerDoParallel(cl)
 
 # Initialize timer
 timer_total <- proc.time()[3]
 
-out <- foreach(ni = 1:12,
+out <- foreach(iter = 1:nIter,
                .packages = c("MASS", "igraph", "corpcor", "hdi",
                              "glmnet", "inet", "qgraph", "mgm"),
-               .export = c("GenData2", "alpha", "p"),
+               .export = c("GenData2", "alpha", "p", "nIter", "n_gs"),
                .verbose = TRUE) %dopar% {
 
-                 # Reproducibility
-                 the_seed <- iter * 1000 + ni
-                 set.seed(the_seed)
+                 ## Storage
+                 # Structure
+                 a_structure <- array(NA, dim=c(p, p, 8, n_gs)) # pxp, true+7methods, nIter
+                 # Point estimates
+                 a_PE <- array(NA, dim=c(p, p, 8, n_gs)) # pxp, true+7methods, nIter
+                 # Confidence intervals (where applicable)
+                 a_CI <- array(NA, dim=c(p, p, 2, 8, n_gs)) # pxp, upper/lower CI, true+7methods, nIter
+                 m_time <- matrix(NA, 7, n_gs)
 
-                 print(the_seed)
+                 for(ni in 1:n_gs) {
 
-                 # Storage
-                 a_results <- array(NA, dim=c(p, p, 8)) # true + 7 methods
-                 v_time <- rep(NA, 7)
+                   print(ni)
 
-                 # --- Data Generation ---
+                   ## Reproducibility
+                   the_seed <- iter * 1000 + ni
+                   set.seed(the_seed)
+                   print(the_seed)
 
-                 graph_data_fix <- GenData2(p = p,
-                                           pe = var_grid[ni,2],
-                                           n = var_grid[ni,1])
+                   # --- Data Generation ---
 
-                 data <- graph_data_fix$data
+                   graph_data_fix <- tryCatch(GenData2(p = p,
+                                                       pe = var_grid[ni, 2],
+                                                       n = var_grid[ni, 1]))
 
-                 a_results[, , 1] <- graph_data_fix$graph
-                 print(paste0("ni = ", ni, " Data Generated"))
+                   # Here I catch an occasional error coming from near-singular covariance
+                   # .. matrices in the data generation
+                   if(is.null(graph_data_fix)) {
 
-                 # --- Estimation ---
+                     outlist <- NULL
 
-                 # 1) Standard OLS
-                 timer_m <- proc.time()[3]
-                 out_OLS <- tryCatch(OLS(data,
-                                         correction = TRUE,
-                                         ci.level = 0.95,
-                                         pbar = FALSE,
-                                         rulereg = "and"))
-                 if(!is.null(out_OLS$signif)) a_results[, , 2] <- out_OLS$signif
-                 v_time[1] <- proc.time()[3] - timer_m
-                 print(paste0("ni = ", ni, " OLS Estimated"))
+                   } else {
 
-                 # 2) LASSO
-                 timer_m <- proc.time()[3]
-                 out_lasso <- tryCatch(suppressMessages(lasso(data,
-                                                              nfold= 10,
-                                                              pbar = FALSE,
-                                                              rulereg = "and")))
-                 if(!is.null(out_lasso$select)) a_results[, , 3] <- out_lasso$select
-                 v_time[2] <- proc.time()[3] - timer_m
-                 print(paste0("ni = ", ni, " LASSO Estimated"))
+                     data <- graph_data_fix$data
 
-                 # 3) Multi-split
-                 timer_m <- proc.time()[3]
-                 out_ms <- tryCatch(suppressMessages(lasso_ms(data,
-                                                              B = 50,
-                                                              fraction = 0.5,
-                                                              correction = TRUE,
-                                                              ci.level = 0.95,
-                                                              pbar = FALSE,
-                                                              rulereg = "and")))
-                 if(!is.null(out_ms$signif)) a_results[, , 4] <- out_ms$signif
-                 v_time[3] <- proc.time()[3] - timer_m
-                 print(paste0("ni = ", ni, " Multi-split Estimated"))
+                     a_structure[, , 1, ni] <- graph_data_fix$graph
+                     a_PE[, , 1, ni] <- graph_data_fix$pcors
+                     print(paste0("ni = ", ni, " Data Generated"))
 
+                     # --- Estimation ---
 
-                 # 4) Desparsified Lasso
-                 timer_m <- proc.time()[3]
-                 out_dsp <- tryCatch(suppressMessages(lasso_dsp(data,
-                                                                betainit = "cv lasso",
-                                                                correction = TRUE,
-                                                                ci.level = 0.95,
-                                                                pbar = FALSE,
-                                                                rulereg = "and")))
-                 if(!is.null(out_dsp$signif)) a_results[, , 5] <- out_dsp$signif
-                 v_time[4] <- proc.time()[3] - timer_m
-                 print(paste0("ni = ", ni, " DespLass Estimated"))
+                     # 1) Standard OLS
+                     timer_m <- proc.time()[3]
+                     out_OLS <- tryCatch(OLS(data,
+                                             correction = TRUE,
+                                             ci.level = 0.95,
+                                             pbar = FALSE,
+                                             rulereg = "and"))
+                     if(!is.null(out_OLS$signif)) {
+                       a_structure[, , 2, ni] <- out_OLS$signif
+                       a_PE[, , 2, ni] <- out_OLS$est
+                       a_CI[, , 1, 2, ni] <- out_OLS$ci.lower
+                       a_CI[, , 2, 2, ni] <- out_OLS$ci.upper
+                     }
+                     m_time[1, ni] <- proc.time()[3] - timer_m
+                     print(paste0("ni = ", ni, " OLS Estimated"))
 
+                     # 2) LASSO
+                     timer_m <- proc.time()[3]
+                     out_lasso <- tryCatch(suppressMessages(lasso(data,
+                                                                  nfold = 10,
+                                                                  pbar = FALSE,
+                                                                  rulereg = "and")))
+                     if(!is.null(out_lasso$select)) {
+                       a_structure[, , 3, ni] <- out_lasso$select
+                       a_PE[, , 3, ni] <- out_lasso$est
+                     }
+                     m_time[2, ni] <- proc.time()[3] - timer_m
+                     print(paste0("ni = ", ni, " LASSO Estimated"))
 
-                 # 5) Desparsified Lasso (bootstrap)
-                 timer_m <- proc.time()[3]
-                 out_dsp_bt <- tryCatch(suppressMessages(lasso_dsp_boot(data,
-                                                                        B = 1000, # Increase to 1000 later
-                                                                        betainit = "cv lasso",
-                                                                        correction = TRUE,
-                                                                        ci.level = 0.95,
-                                                                        pbar = FALSE,
-                                                                        rulereg = "and")))
-                 if(!is.null(out_dsp_bt$signif)) a_results[, , 6] <- out_dsp_bt$signif
-                 v_time[5] <- proc.time()[3] - timer_m
-                 print(paste0("ni = ", ni, " DespLass(Boot) Estimated"))
+                     # 3) Multi-split
+                     timer_m <- proc.time()[3]
+                     out_ms <- tryCatch(suppressMessages(lasso_ms(data,
+                                                                  B = 50,
+                                                                  fraction = 0.5,
+                                                                  correction = TRUE,
+                                                                  ci.level = 0.95,
+                                                                  pbar = FALSE,
+                                                                  rulereg = "and")))
+                     if(!is.null(out_ms$signif)) {
+                       a_structure[, , 4, ni] <- out_ms$signif
+                       a_PE[, , 4, ni] <- out_ms$est
+                       a_CI[, , 1, 4, ni] <- out_ms$ci.lower
+                       a_CI[, , 2, 4, ni] <- out_ms$ci.upper
+                     }
+                     m_time[3, ni] <- proc.time()[3] - timer_m
+                     print(paste0("ni = ", ni, " Multi-split Estimated"))
 
 
-                 # 6) EBIC glasso
-                 timer_m <- proc.time()[3]
-                 out <- EBICglasso(cor(data), n=nrow(data), gamma=0.5)
-                 a_results[, , 7] <- (out != 0)*1
-                 v_time[6] <- proc.time()[3] - timer_m
-                 print(paste0("ni = ", ni, " EBIC glasso Estimated"))
+                     # 4) Desparsified Lasso
+                     timer_m <- proc.time()[3]
+                     out_dsp <- tryCatch(suppressMessages(lasso_dsp(data,
+                                                                    betainit = "cv lasso",
+                                                                    correction = TRUE,
+                                                                    ci.level = 0.95,
+                                                                    pbar = FALSE,
+                                                                    rulereg = "and")))
+                     if(!is.null(out_dsp$signif)) {
+                       a_structure[, , 5, ni] <- out_dsp$signif
+                       a_PE[, , 5, ni] <- out_dsp$est
+                       a_CI[, , 1, 5, ni] <- out_dsp$ci.lower
+                       a_CI[, , 2, 5, ni] <- out_dsp$ci.upper
+                     }
+                     m_time[4, ni] <- proc.time()[3] - timer_m
+                     print(paste0("ni = ", ni, " DespLass Estimated"))
 
-                 # 7) mgm cv 10fold + thresholding
-                 timer_m <- proc.time()[3]
-                 out_mgm <- suppressMessages(mgm(data = data,
-                                type = rep("g", p),
-                                level = rep(1, p),
-                                lambdaSel = "CV",
-                                lambdaFolds = 10,
-                                pbar=FALSE))
-                 a_results[, , 8] <- (out_mgm$pairwise$wadj != 0)*1
-                 v_time[7] <- proc.time()[3] - timer_m
-                 print(paste0("ni = ", ni, " MGM CV10+thr Estimated"))
 
-                 # --- Return ---
+                     # 5) Desparsified Lasso (bootstrap)
+                     timer_m <- proc.time()[3]
+                     out_dsp_bt <- tryCatch(suppressMessages(lasso_dsp_boot(data,
+                                                                            B = 1000,
+                                                                            betainit = "cv lasso",
+                                                                            correction = TRUE,
+                                                                            ci.level = 0.95,
+                                                                            pbar = FALSE,
+                                                                            rulereg = "and")))
+                     if(!is.null(out_dsp_bt$signif)) {
+                       a_structure[, , 6, ni] <- out_dsp_bt$signif
+                       a_PE[, , 6, ni] <- out_dsp_bt$est
+                       a_CI[, , 1, 6, ni] <- out_dsp_bt$ci.lower
+                       a_CI[, , 2, 6, ni] <- out_dsp_bt$ci.upper
+                     }
+                     m_time[5, ni] <- proc.time()[3] - timer_m
+                     print(paste0("ni = ", ni, " DespLass(Boot) Estimated"))
 
-                 outlist <- list("results" = a_results,
-                                 "timing" = v_time)
+
+                     # 6) EBIC glasso
+                     timer_m <- proc.time()[3]
+                     out_EBICg <- EBICglasso(cor(data), n=nrow(data), gamma=0.5)
+                     a_structure[, , 7, ni] <- (out_EBICg != 0)*1
+                     a_PE[, , 7, ni] <- out_EBICg
+                     m_time[6, ni] <- proc.time()[3] - timer_m
+                     print(paste0("ni = ", ni, " EBIC glasso Estimated"))
+
+                     # 7) mgm cv 10fold + thresholding
+                     timer_m <- proc.time()[3]
+                     out_mgm <- suppressMessages(mgm(data = data,
+                                                     type = rep("g", p),
+                                                     level = rep(1, p),
+                                                     lambdaSel = "CV",
+                                                     lambdaFolds = 10,
+                                                     pbar = FALSE))
+                     a_structure[, , 8, ni] <- (out_mgm$pairwise$wadj != 0)*1
+                     a_PE[, , 8, ni] <- out_mgm$pairwise$wadj
+                     m_time[7, ni] <- proc.time()[3] - timer_m
+                     print(paste0("ni = ", ni, " MGM CV10+thr Estimated"))
+
+
+                   } # end for: 12 conditions
+
+
+                   print(paste0("Iter = ", iter, " finished"))
+
+                   # --- Return ---
+
+                   outlist <- list("a_structure" = a_structure,
+                                   "a_PE" = a_PE,
+                                   "a_CI" = a_CI,
+                                   "m_time" = m_time)
+
+                 } # end if: error in data generation?
 
                  return(outlist)
 
@@ -193,30 +249,6 @@ stopCluster(cl)
 # -------- Postprocess & Save -------------------------
 # -----------------------------------------------------
 
-# Combine n-variations
-a_out_all <- array(NA, dim=c(p, p, 6, 2, 8)) # Storage: pxp, n-var, pe-var, true+7methods
-count <- 1
-for(i in 1:2) {
-  for(j in 1:6) {
-    a_out_all[, , j, i, ] <- out[[count]][[1]]
-    count <- count + 1
-  }
-}
-
-# Reorder time info
-a_timing <- array(NA, dim=c(6,2,7)) # n-var, pe-var, 7 methods
-count <- 1
-for(i in 1:2) {
-  for(j in 1:6) {
-    a_timing[j, i, ] <- out[[count]][[2]]
-    count <- count + 1
-  }
-}
-
-
-# Output file
-saveRDS(a_out_all, file = paste0("Simres_L1_Iter_", iter, ".RDS"))
-saveRDS(a_timing, file = paste0("Simres_L1_Iter_time_", iter, ".RDS"))
-
+saveRDS(out, file="L1Sim_2023_output_FIX.RDS")
 
 

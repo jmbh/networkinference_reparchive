@@ -1,10 +1,10 @@
 #!/bin/bash
 
-mkdir "$TMPDIR"/L1Sim_final/
+mkdir "$TMPDIR"/L1Sim_2023/
 
-cd "$HOME"/L1Sim_final
+cd "$HOME"/L1Sim_2023
 
-sbatch -a 1-100 submit_jobs.sh
+sbatch -a 1 submit_jobs.sh
 
 
 

@@ -43,11 +43,12 @@ GenData2 <- function(p, pe, n) {
     diag(theta)[diag(theta)==0] <- mean(diag(theta)[diag(theta)!=0])
 
     eig <- eigen(theta)
-    if(all(eig$values > 0)) valid <- 1 else counter <- counter + 1
+    if(all(eig$values > 0.001)) valid <- 1 else counter <- counter + 1
 
   } # end while
 
   sigma <- solve(theta) # covariance matrix
+  pcors <- cor2pcor(sigma)
 
   # make square root of covariance matrix
   eigen.sigma <- eigen(sigma)
@@ -57,8 +58,8 @@ GenData2 <- function(p, pe, n) {
   Z <- matrix(rnorm(n*p,mean = 0, sd = sd),nrow=n,ncol=p)
   data <- Z %*% t(sqrt.sigma)
 
-
   outlist <- list("graph" = adj,
+                  "pcors" = pcors,
                   "data" = data)
 
 } # eoF
